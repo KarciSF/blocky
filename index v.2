@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Bločky">
+<meta name="theme-color" content="#16a34a">
+<title>Bločky</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto+Slab:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<style>
+  :root { --bg:#f4f4f5; --fg:#18181b; --muted:#71717a; --card:#fff; --accent:#16a34a; --border:#e4e4e7; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f0f10; --fg:#f4f4f5; --muted:#a1a1aa; --card:#1c1c1f; --border:#2e2e33; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:16px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+         padding:16px 16px calc(24px + env(safe-area-inset-bottom)); }
+  header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+  h1 { font-size:22px; margin:0; }
+  button { font:inherit; border:0; border-radius:12px; padding:14px 16px; cursor:pointer;
+           background:var(--accent); color:#fff; font-weight:600; }
+  button.ghost { background:var(--card); color:var(--fg); border:1px solid var(--border); }
+  button:disabled { opacity:.5; }
+  .big { width:100%; font-size:18px; padding:18px; }
+  .row { display:flex; gap:8px; margin-top:10px; }
+  .row > * { flex:1; }
+  input { font:inherit; padding:12px; border-radius:12px; border:1px solid var(--border);
+          background:var(--card); color:var(--fg); min-width:0; }
+  #reader { border-radius:12px; overflow:hidden; margin-top:10px; }
+  #msg { margin:12px 0; color:var(--muted); min-height:1.4em; }
+  #msg.err { color:#dc2626; }
+  details { margin-top:12px; color:var(--muted); font-size:13px; }
+  pre { white-space:pre-wrap; word-break:break-all; }
+
+  /* Bloček: vždy biely, rovnaké rozloženie ako PDF */
+  #receipt { background:#fff; color:#111; width:100%; max-width:380px; margin:0 auto;
+             padding:18px 14px; font:12px/1.4 "Roboto Slab", Georgia, serif;
+             border-radius:4px; box-shadow:0 1px 4px rgba(0,0,0,.15); }
+  #receipt .c { text-align:center; }
+  #receipt .b { font-weight:700; }
+  #receipt .gap { height:8px; }
+  #receipt .cols { display:grid; grid-template-columns:58% 17% 25%; }
+  #receipt .cols > :nth-child(2), #receipt .cols > :nth-child(3) { text-align:right; white-space:nowrap; }
+  #receipt .two { display:flex; justify-content:space-between; gap:8px; }
+  #receipt .sep { display:flex; align-items:center; gap:4px; margin:5px 0; }
+  #receipt .sep::before, #receipt .sep::after { content:""; flex:1; border-top:1px dashed #555; }
+  #receipt .wrap { word-break:break-all; }
+  #receipt .qr { text-align:center; margin:10px 0 6px; }
+  #receipt .qr img { width:110px; height:110px; image-rendering:pixelated; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bločky</h1>
+  <button class="ghost" id="cfgBtn" title="Nastavenia">⚙︎</button>
+</header>
+
+<div id="scanView">
+  <button class="big" id="scanBtn">Skenovať QR</button>
+  <div id="reader"></div>
+  <div class="row">
+    <input id="manual" placeholder="alebo vlož ID dokladu (O-…)" autocapitalize="characters">
+    <button class="ghost" id="goBtn" style="flex:0 0 auto">OK</button>
+  </div>
+</div>
+
+<div id="msg"></div>
+
+<div id="resultView" hidden>
+  <div id="receipt"></div>
+  <div class="row">
+    <button id="pdfBtn" disabled>Zdieľať PDF</button>
+    <button id="pngBtn" disabled>Zdieľať PNG</button>
+  </div>
+  <div class="row"><button class="ghost" id="againBtn">Ďalší bloček</button></div>
+  <details><summary>Surové dáta</summary><pre id="raw"></pre></details>
+</div>
+
+<script>
+// URL Apps Script proxy (eKasa API). Ikonkou ⚙︎ sa dá prepísať.
+const DEFAULT_PROXY = 'https://script.google.com/macros/s/AKfycbyob_SDT2n-zpySmEqdU9FhZabjfyQYSxHpOjvzIxvUJvAXznKc-HcmSV4y4NfGqtekUQ/exec';
+// Font do PDF (s diakritikou), načíta sa raz a prehliadač si ho zapamätá.
+const FONT_BASE = 'https://cdn.jsdelivr.net/npm/@expo-google-fonts/roboto-slab@0.4.2/';
+const FONT_FILES = ['400Regular/RobotoSlab_400Regular.ttf', '700Bold/RobotoSlab_700Bold.ttf'];
+
+const $ = id => document.getElementById(id);
+let scanner = null, files = { pdf:null, png:null };
+
+function store(k, v) { try { v === undefined ? (v = localStorage.getItem(k)) : localStorage.setItem(k, v); } catch (e) { v = null; } return v; }
+function getProxy(force) {
+  let u = (!force && (store('proxy') || DEFAULT_PROXY)) || '';
+  if (!u || force) {
+    u = prompt('URL Apps Script web appky (končí /exec):', u || store('proxy') || DEFAULT_PROXY) || u;
+    if (u) store('proxy', u.trim());
+  }
+  return (u || '').trim();
+}
+function msg(t, err) { $('msg').textContent = t || ''; $('msg').className = err ? 'err' : ''; }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+const f2 = n => Number(n || 0).toFixed(2);
+const r2 = n => Math.round(Number(n || 0) * 100) / 100;
+
+// ---------- fonty ----------
+let fontsP = null;
+function toB64(buf) {
+  let s = ''; const u = new Uint8Array(buf);
+  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function loadFonts() {
+  if (!fontsP) {
+    fontsP = Promise.all(FONT_FILES.map(p => fetch(FONT_BASE + p)
+      .then(r => { if (!r.ok) throw new Error('Font sa nenačítal'); return r.arrayBuffer(); })
+      .then(toB64)));
+    fontsP.catch(() => { fontsP = null; });
+  }
+  return fontsP;
+}
+loadFonts().catch(() => {});
+
+// ---------- skenovanie ----------
+async function startScan() {
+  msg('');
+  $('scanBtn').disabled = true;
+  try {
+    scanner = scanner || new Html5Qrcode('reader');
+    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 250, height: 250 } },
+      async text => { await stopScan(); handleCode(text); }, () => {});
+  } catch (e) {
+    msg('Kamera sa nespustila: ' + e, true);
+    $('scanBtn').disabled = false;
+  }
+}
+async function stopScan() {
+  try { if (scanner && scanner.isScanning) await scanner.stop(); } catch (e) {}
+  $('scanBtn').disabled = false;
+}
+
+function handleCode(text) {
+  const t = String(text).trim();
+  const m = t.match(/O-[0-9A-Z]{20,}/i);
+  if (m) return load(m[0].toUpperCase());
+  if (t.split(':').length >= 5) {
+    msg('Toto je offline bloček (OKP). Tieto zatiaľ nepodporujem, finančná správa ich ešte nemusí mať. Skús ho o deň.', true);
+    return;
+  }
+  load(t);
+}
+
+// ---------- načítanie z eKasy ----------
+async function load(id) {
+  const proxy = getProxy();
+  if (!proxy) return msg('Chýba URL proxy (⚙︎ hore).', true);
+  msg('Sťahujem bloček…');
+  try {
+    const res = await fetch(proxy + (proxy.includes('?') ? '&' : '?') + 'id=' + encodeURIComponent(id));
+    const j = await res.json();
+    $('raw').textContent = JSON.stringify(j, null, 2);
+    if (j.error) throw new Error(j.error);
+    const r = j.data && j.data.receipt;
+    if (!r) throw new Error('Bloček sa nenašiel (returnValue: ' + (j.data && j.data.returnValue) + ')');
+    const model = buildModel(r);
+    renderHtml(model);
+    msg('Pripravujem súbory…');
+    await buildFiles(r, model);
+    msg('');
+  } catch (e) {
+    msg('Chyba: ' + e.message, true);
+  }
+}
+
+// ---------- model bločku (spoločný pre obrazovku, PNG aj PDF) ----------
+function addrLines(x) {
+  if (!x) return [];
+  const no = [x.propertyRegistrationNumber, x.buildingNumber].filter(Boolean).join('/');
+  const street = [x.streetName, no].filter(Boolean).join(' ');
+  const city = [x.postalCode, x.municipality].filter(Boolean).join(' ');
+  return [street, city].filter(Boolean);
+}
+
+function vatRows(r) {
+  if (Array.isArray(r.vatSummary) && r.vatSummary.length) {
+    return r.vatSummary.map(v => ({ rate: v.vat ? v.vat.vatRate : v.vatRate, base: v.vatBase, vat: v.vatAmount }));
+  }
+  // záloha: dopočítať z položiek
+  const g = {};
+  (r.items || []).forEach(i => { const k = Number(i.vatRate || 0); g[k] = (g[k] || 0) + Number(i.price || 0); });
+  return Object.keys(g).map(Number).sort((a, b) => b - a).map(rate => {
+    const base = r2(g[rate] / (1 + rate / 100));
+    return { rate, base, vat: r2(g[rate] - base) };
+  });
+}
+
+function buildModel(r) {
+  const o = r.organization || {}, u = r.unit || {};
+  const L = [];
+  const c = (text, b) => L.push({ t: 'c', text, b });
+  const l = (text, b) => L.push({ t: 'l', text, b });
+
+  c(o.name || 'Neznámy predajca');
+  addrLines(o).forEach(x => c(x));
+  const unitLines = [u.name, ...addrLines(u)].filter(Boolean);
+  if (unitLines.length) { c('Predajné miesto:'); unitLines.forEach(x => c(x)); }
+  L.push({ t: 'gap' });
+
+  c([r.dic && 'DIČ: ' + r.dic, r.ico && 'IČO: ' + r.ico].filter(Boolean).join('      '));
+  c([r.icDph && 'IČDPH: ' + r.icDph, r.cashRegisterCode && 'KP: ' + r.cashRegisterCode].filter(Boolean).join('      '));
+  c('Dátum a čas: ' + (r.issueDate || r.createDate || ''));
+  c('Číslo dokladu: ' + (r.receiptNumber ?? ''));
+  if (r.paragon) c('Paragón č.: ' + (r.paragonNumber ?? ''));
+  if (r.invoiceNumber) c('Číslo faktúry: ' + r.invoiceNumber);
+  if (r.customerId) c('ID kupujúceho: ' + r.customerId);
+  L.push({ t: 'gap' });
+
+  l('Položky:');
+  (r.items || []).forEach(i => {
+    const q = Number(i.quantity || 0);
+    const unit = q ? Number(i.price || 0) / q : Number(i.price || 0);
+    L.push({ t: 'cols', cols: [i.name || '', i.vatRate != null ? Number(i.vatRate).toFixed(1) + '%' : '', f2(i.price) + ' €'] });
+    l(q.toFixed(2) + ' ks * ' + f2(unit));
+  });
+  L.push({ t: 'sep' });
+  L.push({ t: 'two', a: 'NA ÚHRADU EUR', b: f2(r.totalPrice), bold: true });
+  L.push({ t: 'sep', title: 'DPH REKAPITULÁCIA' });
+  L.push({ t: 'cols', cols: ['Sadzba:', 'Základ:', 'DPH:'] });
+  const vr = vatRows(r);
+  vr.forEach(v => L.push({ t: 'cols', cols: [Number(v.rate || 0).toFixed(1) + ' %', f2(v.base), f2(v.vat)] }));
+  L.push({ t: 'sep' });
+  L.push({ t: 'cols', cols: ['SPOLU:', f2(vr.reduce((s, v) => s + Number(v.base || 0), 0)), f2(vr.reduce((s, v) => s + Number(v.vat || 0), 0))] });
+  if (r.okp) { l('OKP:'); l(r.okp); }
+  if (r.receiptId) { l('UID:'); l(r.receiptId); }
+  L.push({ t: 'qr', data: r.receiptId || r.okp || '' });
+  c('Elektronická kópia dokladu.');
+  c('OVERTE DOKLAD POMOCOU QR KÓDU');
+  return L;
+}
+
+function qrFor(data) {
+  const q = qrcode(0, 'M');
+  q.addData(data);
+  q.make();
+  return q;
+}
+
+// ---------- obrazovka / PNG ----------
+function renderHtml(L) {
+  $('receipt').innerHTML = L.map(x => {
+    const b = x.b || x.bold ? ' b' : '';
+    switch (x.t) {
+      case 'c': return `<div class="c wrap${b}">${esc(x.text)}</div>`;
+      case 'l': return `<div class="wrap${b}">${esc(x.text)}</div>`;
+      case 'gap': return '<div class="gap"></div>';
+      case 'cols': return `<div class="cols${b}"><span>${esc(x.cols[0])}</span><span>${esc(x.cols[1])}</span><span>${esc(x.cols[2])}</span></div>`;
+      case 'two': return `<div class="two${b}"><span>${esc(x.a)}</span><span>${esc(x.b)}</span></div>`;
+      case 'sep': return `<div class="sep">${x.title ? `<span>${esc(x.title)}</span>` : ''}</div>`;
+      case 'qr': return x.data ? `<div class="qr"><img alt="QR" src="${qrFor(x.data).createDataURL(4, 0)}"></div>` : '';
+    }
+    return '';
+  }).join('');
+  $('scanView').hidden = true;
+  $('resultView').hidden = false;
+  window.scrollTo(0, 0);
+}
+
+// ---------- PDF (textové, A4) ----------
+function drawPdf(L, fonts) {
+  const doc = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4' });
+  doc.addFileToVFS('RS-R.ttf', fonts[0]); doc.addFont('RS-R.ttf', 'RS', 'normal');
+  doc.addFileToVFS('RS-B.ttf', fonts[1]); doc.addFont('RS-B.ttf', 'RS', 'bold');
+  doc.setFont('RS', 'normal');
+  doc.setFontSize(8);
+  const X = 20, W = 75, MID = X + W * 0.75, LH = 3.6, BOTTOM = 280;
+  let y = 22;
+  const need = h => { if (y + h > BOTTOM) { doc.addPage(); y = 22; } };
+  const font = b => doc.setFont('RS', b ? 'bold' : 'normal');
+
+  L.forEach(x => {
+    font(x.b || x.bold);
+    if (x.t === 'c' || x.t === 'l') {
+      const lines = doc.splitTextToSize(String(x.text), W);
+      need(lines.length * LH);
+      lines.forEach(s => { x.t === 'c' ? doc.text(s, X + W / 2, y, { align: 'center' }) : doc.text(s, X, y); y += LH; });
+    } else if (x.t === 'gap') {
+      y += LH * 0.7;
+    } else if (x.t === 'cols') {
+      const lines = doc.splitTextToSize(String(x.cols[0]), W * 0.58);
+      need(lines.length * LH);
+      lines.forEach((s, k) => doc.text(s, X, y + k * LH));
+      doc.text(String(x.cols[1]), MID, y, { align: 'right' });
+      doc.text(String(x.cols[2]), X + W, y, { align: 'right' });
+      y += lines.length * LH;
+    } else if (x.t === 'two') {
+      need(LH);
+      doc.text(String(x.a), X, y);
+      doc.text(String(x.b), X + W, y, { align: 'right' });
+      y += LH;
+    } else if (x.t === 'sep') {
+      need(LH);
+      const my = y - 1.1;
+      doc.setLineWidth(0.15);
+      doc.setLineDashPattern([0.8, 0.6], 0);
+      if (x.title) {
+        const tw = doc.getTextWidth(x.title) + 2;
+        doc.line(X, my, X + (W - tw) / 2, my);
+        doc.line(X + (W + tw) / 2, my, X + W, my);
+        doc.text(x.title, X + W / 2, y, { align: 'center' });
+      } else {
+        doc.line(X, my, X + W, my);
+      }
+      doc.setLineDashPattern([], 0);
+      y += LH;
+    } else if (x.t === 'qr' && x.data) {
+      const q = qrFor(x.data), n = q.getModuleCount(), S = 24, cell = S / n;
+      need(S + 4);
+      y += 1;
+      const qx = X + (W - S) / 2;
+      doc.setFillColor(0, 0, 0);
+      for (let rr = 0; rr < n; rr++) for (let cc = 0; cc < n; cc++) {
+        if (q.isDark(rr, cc)) doc.rect(qx + cc * cell, y + rr * cell, cell + 0.01, cell + 0.01, 'F');
+      }
+      y += S + 5;
+    }
+  });
+  return doc.output('blob');
+}
+
+// ---------- súbory ----------
+function fileBase(r) {
+  const d = String(r.issueDate || r.createDate || '').match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  const date = d ? `${d[3]}-${d[2].padStart(2, '0')}-${d[1].padStart(2, '0')}` : new Date().toISOString().slice(0, 10);
+  const shop = String((r.organization && r.organization.name) || 'blocek')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\b(s\.?\s?r\.?\s?o\.?|a\.?\s?s\.?|spol\.)/gi, '')
+    .replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'blocek';
+  const sum = r.totalPrice != null ? '_' + Number(r.totalPrice).toFixed(2).replace('.', ',') + 'EUR' : '';
+  return `${date}_${shop}${sum}`;
+}
+
+// Súbory sa pripravia hneď, aby klik na "Zdieľať" zavolal share okamžite (iOS to inak zablokuje).
+async function buildFiles(r, L) {
+  $('pdfBtn').disabled = $('pngBtn').disabled = true;
+  const base = fileBase(r);
+  const fonts = await loadFonts();
+  files.pdf = new File([drawPdf(L, fonts)], base + '.pdf', { type: 'application/pdf' });
+  $('pdfBtn').disabled = false;
+  try { await document.fonts.ready; } catch (e) {}
+  const canvas = await html2canvas($('receipt'), { scale: 2, backgroundColor: '#ffffff' });
+  const pngBlob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+  files.png = new File([pngBlob], base + '.png', { type: 'image/png' });
+  $('pngBtn').disabled = false;
+}
+
+async function share(file) {
+  if (!file) return;
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: file.name }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file); a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+// ---------- UI ----------
+$('scanBtn').onclick = startScan;
+$('goBtn').onclick = () => { const v = $('manual').value.trim(); if (v) handleCode(v); };
+$('manual').onkeydown = e => { if (e.key === 'Enter') $('goBtn').click(); };
+$('pdfBtn').onclick = () => share(files.pdf);
+$('pngBtn').onclick = () => share(files.png);
+$('cfgBtn').onclick = () => getProxy(true);
+$('againBtn').onclick = () => {
+  $('resultView').hidden = true; $('scanView').hidden = false;
+  $('manual').value = ''; files = { pdf: null, png: null }; msg('');
+  startScan();
+};
+</script>
+</body>
+</html>
